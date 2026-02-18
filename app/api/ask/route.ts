@@ -9,10 +9,10 @@ export async function POST(req: Request) {
 
     let messages = [];
     
-    // ✅ Text Model: Llama 3.3 (Ye active hai)
+    //  Text Model: Llama 3.3 (Ye active hai)
     let model = "llama-3.3-70b-versatile"; 
 
-    // ✅ Vision Model: Llama 4 Scout (Ye naya active model hai)
+    //  Vision Model: Llama 4 Scout (Ye naya active model hai)
     if (fileData) {
       model = "meta-llama/llama-4-scout-17b-16e-instruct"; // 📸 NEW MODEL
       messages = [
