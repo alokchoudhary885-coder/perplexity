@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 
+// History Item Type
 type HistoryItem = {
   query: string;
   answer: string;
@@ -18,9 +19,10 @@ export default function Home() {
   const [fileType, setFileType] = useState<string>("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // मोबाइल के लिए साइडबार टॉगल (Naya Feature)
+  // मोबाइल के लिए साइडबार टॉगल
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
+  // 🔄 Load History
   useEffect(() => {
     const savedHistory = localStorage.getItem("chatHistory");
     if (savedHistory) {
@@ -28,26 +30,40 @@ export default function Home() {
     }
   }, []);
 
+  // 🛑 Stop speaking on unmount
   useEffect(() => {
-    return () => { window.speechSynthesis.cancel(); };
+    return () => {
+      window.speechSynthesis.cancel();
+    };
   }, []);
 
+  // 🆕 New Chat
   const startNewChat = () => {
     setQuery("");
     setAnswer("");
     setSources([]);
     setSelectedFile(null);
     window.speechSynthesis.cancel();
-    setIsSidebarOpen(false); // मोबाइल पर नया चैट शुरू होते ही साइडबार बंद
+    setIsSidebarOpen(false); // मोबाइल पर बंद करें
   };
 
+  // 📂 Load Old Chat
   const loadChat = (item: HistoryItem) => {
     setQuery(item.query);
     setAnswer(item.answer);
     setSources(["Saved Chat", "Memory"]);
-    setIsSidebarOpen(false); // मोबाइल पर चैट लोड होते ही साइडबार बंद
+    setIsSidebarOpen(false); // मोबाइल पर बंद करें
   };
 
+  // 🗑️ Delete Chat from Library
+  const deleteChat = (e: React.MouseEvent, index: number) => {
+    e.stopPropagation(); // लोड चैट को ट्रिगर होने से रोकें
+    const updatedHistory = history.filter((_, i) => i !== index);
+    setHistory(updatedHistory);
+    localStorage.setItem("chatHistory", JSON.stringify(updatedHistory));
+  };
+
+  // 📎 Handle File Selection
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -62,6 +78,7 @@ export default function Home() {
     }
   };
 
+  // 🎤 Voice Input
   const startListening = () => {
     if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
       const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
@@ -77,6 +94,7 @@ export default function Home() {
         setIsListening(false);
         handleSearch(transcript);
       };
+
       recognition.onerror = () => setIsListening(false);
       recognition.onend = () => setIsListening(false);
     } else {
@@ -84,6 +102,7 @@ export default function Home() {
     }
   };
 
+  // 🔊 Text-to-Speech
   const handleSpeak = () => {
     if (!answer) return;
     if (isSpeaking) {
@@ -99,9 +118,11 @@ export default function Home() {
     }
   };
 
+  // 🔍 Search Function
   const handleSearch = async (manualQuery?: string) => {
     const searchQuery = manualQuery || query;
     if (!searchQuery) return;
+
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
     setLoading(true);
@@ -112,15 +133,22 @@ export default function Home() {
       const res = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: searchQuery, fileData: selectedFile, mimeType: fileType }),
+        body: JSON.stringify({ 
+            query: searchQuery,
+            fileData: selectedFile,
+            mimeType: fileType
+        }),
       });
       const data = await res.json();
+      
       setAnswer(data.answer);
       setSources(["AI Vision", "Knowledge Base"]);
+
       const updatedHistory = [{ query: searchQuery, answer: data.answer }, ...history];
       setHistory(updatedHistory);
       localStorage.setItem("chatHistory", JSON.stringify(updatedHistory));
       setSelectedFile(null);
+
     } catch (error) {
       setAnswer("Kuch gadbad ho gayi. Please try again.");
     } finally {
@@ -131,15 +159,12 @@ export default function Home() {
   return (
     <div className="flex h-screen bg-gray-950 text-gray-200 font-sans overflow-hidden selection:bg-blue-500/30">
       
-      {/* 📱 MOBILE OVERLAY (जब साइडबार खुला हो) */}
+      {/* 📱 Mobile Overlay */}
       {isSidebarOpen && (
-        <div 
-          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden"
-          onClick={() => setIsSidebarOpen(false)}
-        />
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 md:hidden" onClick={() => setIsSidebarOpen(false)} />
       )}
 
-      {/* 🟢 SIDEBAR (Updated for Mobile) */}
+      {/* 🟢 SIDEBAR (Enhanced Responsive) */}
       <div className={`
         fixed md:relative z-50 h-full w-72 bg-gray-900/95 md:bg-gray-900/50 backdrop-blur-xl border-r border-white/10 
         transition-transform duration-300 md:translate-x-0
@@ -150,25 +175,32 @@ export default function Home() {
            <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
              <span className="text-blue-500 text-2xl">⚡</span> Perplexity
            </h1>
-           {/* Mobile Close Button */}
-           <button onClick={() => setIsSidebarOpen(false)} className="md:hidden text-gray-400">✕</button>
+           <button onClick={() => setIsSidebarOpen(false)} className="md:hidden text-gray-400 hover:text-white">✕</button>
         </div>
+        
         <div className="p-4">
           <button onClick={startNewChat} className="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all shadow-lg font-medium group">
             <span className="group-hover:rotate-90 transition-transform duration-300">➕</span> New Thread
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-3 py-2 scrollbar-thin">
-          <h3 className="text-xs font-bold text-gray-500 uppercase px-4 mb-3 tracking-wider">Library</h3>
-          <div className="space-y-1">
-            {history.map((item, index) => (
-              <div key={index} onClick={() => loadChat(item)} className="group flex items-center gap-3 px-4 py-3 hover:bg-white/5 rounded-xl cursor-pointer transition-all border border-transparent">
-                <span className="text-gray-500 group-hover:text-blue-400">💬</span>
-                <span className="truncate text-sm text-gray-400 group-hover:text-white">{item.query}</span>
-              </div>
-            ))}
+
+        <div className="flex-1 overflow-y-auto px-3 py-2 scrollbar-thin scrollbar-thumb-gray-800">
+          <h3 className="text-[10px] font-bold text-gray-500 uppercase px-4 mb-4 tracking-[0.2em]">Library</h3>
+          <div className="space-y-2">
+            {history.length > 0 ? (
+              history.map((item, index) => (
+                <div key={index} onClick={() => loadChat(item)} className="group flex items-center gap-3 px-4 py-3 hover:bg-white/5 rounded-xl cursor-pointer transition-all border border-transparent hover:border-white/10 relative">
+                  <div className="w-8 h-8 rounded-lg bg-gray-800 flex items-center justify-center text-xs group-hover:bg-blue-600/20 group-hover:text-blue-400 transition-colors">💬</div>
+                  <span className="truncate text-xs font-medium text-gray-400 group-hover:text-white transition-colors flex-1">{item.query}</span>
+                  <button onClick={(e) => deleteChat(e, index)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 text-gray-500 transition-opacity">🗑️</button>
+                </div>
+              ))
+            ) : (
+              <p className="px-4 text-xs text-gray-600 italic">No chats yet...</p>
+            )}
           </div>
         </div>
+
         <div className="p-4 border-t border-white/5 bg-gray-900/30">
            <div className="flex items-center gap-3 bg-gray-800/50 p-3 rounded-xl border border-white/5">
              <div className="w-10 h-10 bg-gradient-to-tr from-blue-500 to-purple-500 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-lg">AC</div>
@@ -179,13 +211,13 @@ export default function Home() {
 
       {/* 🔵 MAIN CONTENT AREA */}
       <div className="flex-1 flex flex-col items-center relative overflow-hidden w-full">
-        {/* Mobile Header (Sidebar Toggle) */}
+        {/* Mobile Navbar Toggle */}
         <div className="w-full p-4 flex md:hidden items-center justify-between z-30">
           <button onClick={() => setIsSidebarOpen(true)} className="p-2 bg-gray-800/50 rounded-lg text-white">
-            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
           <span className="font-bold text-sm text-blue-500">⚡ Perplexity</span>
-          <div className="w-10 h-10"></div> {/* Spacer */}
+          <div className="w-10"></div>
         </div>
 
         <div className="absolute top-0 left-0 w-full h-full bg-gradient-to-b from-gray-900 to-black -z-10"></div>
@@ -206,7 +238,7 @@ export default function Home() {
                 <div className="mb-3 relative w-fit animate-in fade-in zoom-in duration-300">
                   <div className="bg-gray-800 border border-gray-600 px-3 py-1.5 rounded-lg flex items-center gap-2 shadow-lg">
                     <span className="text-lg">🖼️</span>
-                    <span className="text-[10px] text-green-400 font-bold uppercase">Image Attached</span>
+                    <span className="text-[10px] text-green-400 font-bold uppercase tracking-tight">Image Attached</span>
                     <button onClick={() => setSelectedFile(null)} className="text-gray-400 hover:text-red-400 transition ml-1">✕</button>
                   </div>
                 </div>
@@ -231,10 +263,7 @@ export default function Home() {
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
                 />
                 
-                <button
-                  onClick={startListening}
-                  className={`p-2 rounded-full transition-all ${isListening ? "text-red-500 animate-pulse" : "text-gray-400"}`}
-                >
+                <button onClick={startListening} className={`p-2 rounded-full transition-all ${isListening ? "text-red-500 animate-pulse" : "text-gray-400"}`}>
                   <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
                 </button>
 
@@ -259,28 +288,18 @@ export default function Home() {
             )}
 
             {!loading && answer && (
-              <div className="max-w-3xl mx-auto">
-                <div className="bg-[#1e1e1e]/80 backdrop-blur-sm p-5 md:p-8 rounded-2xl border border-gray-700/30 shadow-2xl relative overflow-hidden group">
+              <div className="max-w-3xl mx-auto pb-4">
+                <div className="bg-[#1e1e1e]/80 backdrop-blur-sm p-5 md:p-8 rounded-2xl border border-gray-700/30 shadow-2xl relative overflow-hidden">
                   <div className="flex items-center justify-between mb-5 border-b border-gray-700/50 pb-3">
                     <div className="flex items-center gap-2">
-                      <div className="bg-blue-600/20 p-1.5 rounded-lg text-blue-400">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5c0-2 2-3 4-4Z"/></svg>
-                      </div>
-                      <h2 className="text-sm font-semibold text-white">Perplexity</h2>
+                      <div className="bg-blue-600/20 p-1.5 rounded-lg text-blue-400">⚡</div>
+                      <h2 className="text-sm font-semibold text-white">Answer</h2>
                     </div>
-                    
                     <button onClick={handleSpeak} className={`p-2 rounded-full transition-all ${isSpeaking ? "bg-blue-500/20 text-blue-400" : "bg-gray-800 text-gray-400"}`}>
-                      {isSpeaking ? (
-                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
-                      ) : (
-                         <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-                      )}
+                      {isSpeaking ? "⏸️" : "🔊"}
                     </button>
                   </div>
-
-                  <div className="prose prose-invert max-w-none">
-                    <p className="text-gray-300 leading-relaxed text-sm md:text-[17px] whitespace-pre-wrap font-light">{answer}</p>
-                  </div>
+                  <p className="text-gray-300 leading-relaxed text-sm md:text-base whitespace-pre-wrap font-light">{answer}</p>
                 </div>
               </div>
             )}
