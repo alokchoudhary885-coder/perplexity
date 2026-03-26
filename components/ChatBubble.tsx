@@ -5,6 +5,23 @@ import { Message, formatTime } from "@/lib/types";
 interface ChatBubbleProps {
   message: Message;
   onCopy: (message: Message) => void;
+  isStreaming?: boolean;
+}
+
+/**
+ * Streaming indicator component - pulsing dots animation
+ */
+function StreamingIndicator() {
+  return (
+    <div className="flex items-center gap-1 mt-2">
+      <span className="text-xs text-gray-400">Streaming</span>
+      <div className="flex gap-1">
+        <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" />
+        <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: "0.2s" }} />
+        <span className="w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: "0.4s" }} />
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -12,8 +29,9 @@ interface ChatBubbleProps {
  * Renders individual messages as bubbles in the hybrid chat interface
  * - User messages: right-aligned, blue background
  * - Assistant messages: left-aligned, gray background
+ * - Supports streaming state with visual indicator
  */
-export function ChatBubble({ message, onCopy }: ChatBubbleProps) {
+export function ChatBubble({ message, onCopy, isStreaming = false }: ChatBubbleProps) {
   const isUser = message.role === "user";
 
   return (
@@ -36,6 +54,9 @@ export function ChatBubble({ message, onCopy }: ChatBubbleProps) {
           {message.content}
         </p>
 
+        {/* Streaming Indicator */}
+        {isStreaming && <StreamingIndicator />}
+
         {/* Timestamp and Copy Button */}
         <div className="flex items-center justify-between mt-2 gap-2 border-t border-opacity-20 pt-2 border-current">
           <span className="text-xs opacity-70">
@@ -56,12 +77,15 @@ export function ChatBubble({ message, onCopy }: ChatBubbleProps) {
         </div>
 
         {/* Metadata Display (for assistant messages only) */}
-        {!isUser && message.metadata && (
+        {!isUser && message.metadata && !isStreaming && (
           <div className="mt-2 text-xs opacity-60 border-t border-opacity-20 pt-1 border-current">
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               <span>🤖 {message.metadata.model}</span>
               {message.metadata.responseTime !== undefined && message.metadata.responseTime > 0 && (
                 <span>⏱️ {message.metadata.responseTime}ms</span>
+              )}
+              {message.metadata.tokensUsed !== undefined && message.metadata.tokensUsed > 0 && (
+                <span>📊 {message.metadata.tokensUsed} tokens</span>
               )}
             </div>
           </div>

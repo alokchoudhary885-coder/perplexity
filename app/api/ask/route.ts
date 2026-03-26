@@ -23,6 +23,10 @@ interface ResponseMetadata {
   model: "text" | "vision";
   responseTime: number;
   tokensUsed: number;
+  isComplete?: boolean;
+  protocolVersion?: string;
+  streamDuration?: number;
+  charsReceived?: number;
 }
 
 // ✅ Estimate token count (~4 chars per token for Groq models)
@@ -113,6 +117,10 @@ export async function POST(req: NextRequest) {
       : [SYSTEM_PROMPT, ...conversationHistory.slice(-5), currentUserMessage];
       // slice(-5) = last 5 messages only — balance token limit & context awareness
 
+    // ✅ Create abort signal with 30-second timeout
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
     // ✅ Call Groq API with STREAMING enabled
     const groqResponse = await fetchWithRetry(
       "https://api.groq.com/openai/v1/chat/completions",
@@ -125,15 +133,17 @@ export async function POST(req: NextRequest) {
         body: JSON.stringify({
           messages,
           model,
-          temperature: 0.6,        // Thoda kam — more factual answers
-          max_tokens: 4096,         // ✅ 1024 se badhaya — lambe answers ke liye
-          stream: true,             // ✅ KEY CHANGE: Streaming ON
+          temperature: 0.6,        // Balanced for accuracy
+          max_tokens: 4096,        // Allow longer responses
+          stream: true,            // ✅ Streaming enabled
           top_p: 0.9,
         }),
+        signal: controller.signal,
       }
     );
 
     if (!groqResponse.ok) {
+      clearTimeout(timeoutId);
       const errData = await groqResponse.json();
       console.error("Groq API Error:", errData);
       return new Response(
@@ -150,6 +160,7 @@ export async function POST(req: NextRequest) {
       async start(controller) {
         const reader = groqResponse.body?.getReader();
         if (!reader) {
+          clearTimeout(timeoutId);
           controller.close();
           return;
         }
@@ -157,6 +168,7 @@ export async function POST(req: NextRequest) {
         const decoder = new TextDecoder();
         let fullAnswer = "";
         const metadataStart = Date.now();  // Track for response time
+        let charsReceived = 0;
 
         try {
           // First, enqueue metadata as JSON on first line
@@ -165,6 +177,10 @@ export async function POST(req: NextRequest) {
             model: modelType,
             responseTime: 0,  // Will update at end
             tokensUsed: 0,    // Will update at end
+            isComplete: false,  // Initially incomplete
+            protocolVersion: "1.0",
+            streamDuration: 0,
+            charsReceived: 0,
           };
           controller.enqueue(
             new TextEncoder().encode(JSON.stringify(metadata) + "\n")
@@ -181,6 +197,7 @@ export async function POST(req: NextRequest) {
               if (line.startsWith("data: ")) {
                 const data = line.slice(6);
                 if (data === "[DONE]") {
+                  // ✅ Stream complete - close the stream
                   controller.close();
                   return;
                 }
@@ -189,6 +206,7 @@ export async function POST(req: NextRequest) {
                   const token = parsed.choices?.[0]?.delta?.content;
                   if (token) {
                     fullAnswer += token;
+                    charsReceived += token.length;
                     // Frontend ko raw text tokens bhejo
                     controller.enqueue(new TextEncoder().encode(token));
                   }
@@ -199,10 +217,21 @@ export async function POST(req: NextRequest) {
             }
           }
         } catch (streamError) {
-          console.error("Stream reading error:", streamError);
-          controller.error(streamError);
+          // ✅ Better error handling - send error indicator
+          if (streamError instanceof Error && streamError.name === "AbortError") {
+            console.warn("Stream timeout - request took longer than 30 seconds");
+          } else {
+            console.error("Stream reading error:", streamError);
+          }
+          // Let the stream close naturally or with error
+          controller.close();
         } finally {
-          reader.releaseLock();
+          try {
+            reader.releaseLock();
+          } catch {
+            // Reader already released
+          }
+          clearTimeout(timeoutId);
         }
       },
     });

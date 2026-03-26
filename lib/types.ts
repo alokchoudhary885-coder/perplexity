@@ -44,6 +44,10 @@ export interface ResponseMetadata {
   model: "text" | "vision";
   responseTime: number;
   tokensUsed: number;
+  isComplete?: boolean;  // Whether stream finished successfully
+  protocolVersion?: string;  // For future compatibility
+  streamDuration?: number;  // Actual streaming duration in ms
+  charsReceived?: number;  // Characters received in stream
 }
 
 // ✅ Old HistoryItem (kept for migration)

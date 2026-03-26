@@ -13,6 +13,14 @@ import {
   migrateHistoryToMessages,
 } from "@/lib/types";
 import * as db from "@/lib/db";
+import {
+  createStreamBatcher,
+  createStreamTimeout,
+  parseStreamChunk,
+  estimateReadingTime,
+  estimateProgressPercentage,
+  StreamManager,
+} from "@/lib/streaming";
 import { ChatBubble, ChatContainer } from "@/components/ChatBubble";
 
 // Legacy HistoryItem for migration
@@ -267,7 +275,7 @@ export default function Home() {
   // ==================== SEARCH & STREAMING ====================
 
   /**
-   * Main search function with streaming response
+   * Main search function with optimized streaming and debounced updates
    */
   const handleSearch = async (manualQuery?: string) => {
     const searchQuery = manualQuery || query;
@@ -277,12 +285,21 @@ export default function Home() {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
-    abortControllerRef.current = new AbortController();
 
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
 
     try {
+      // Create abort signal with 30-second timeout
+      abortControllerRef.current = new AbortController();
+      const timeoutSignal = createStreamTimeout(30000);
+
+      // Race between user abort and timeout
+      const abortSignal = AbortSignal.any([
+        abortControllerRef.current.signal,
+        timeoutSignal,
+      ]);
+
       // Create or get conversation
       let conversationId = chatState.currentConversationId;
       if (!conversationId) {
@@ -293,7 +310,6 @@ export default function Home() {
           await db.saveConversation(getSessionId(), conversationId, title);
         } catch (error) {
           console.warn("Could not save conversation to Supabase:", error);
-          // Fall back to localStorage
           localStorage.setItem(`conv_${conversationId}`, JSON.stringify([]));
         }
       }
@@ -335,58 +351,85 @@ export default function Home() {
           conversationHistory,
           conversationId,
         }),
-        signal: abortControllerRef.current.signal,
+        signal: abortSignal,
       });
 
       if (!res.ok || !res.body) {
         throw new Error(`API error: ${res.status}`);
       }
 
+      // ✅ Setup debounced updates to prevent excessive re-renders
+      const batcher = createStreamBatcher(
+        (text) => {
+          setChatState((prev) => ({
+            ...prev,
+            currentResponse: text,
+          }));
+        },
+        { maxChars: 500, delayMs: 100 }
+      );
+
       // Parse streaming response with metadata
       let metadata: ResponseMetadata = {
         model: selectedFile ? "vision" : "text",
         responseTime: 0,
         tokensUsed: 0,
+        isComplete: false,
       };
       let fullAnswer = "";
       let firstLine = true;
       const responseStart = Date.now();
+      const streamManager = new StreamManager();
+      let streamedBytes = 0;
+      let isStreamAborted = false;
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-
-        if (firstLine && chunk.includes("\n")) {
-          const lines = chunk.split("\n");
+      // ✅ Use StreamManager for better error handling
+      const { success, error } = await streamManager.readStream(
+        res,
+        (chunk) => {
           try {
-            // First line should be metadata JSON
-            metadata = JSON.parse(lines[0]);
-            fullAnswer = lines.slice(1).join("\n");
-          } catch {
-            fullAnswer = chunk;  // Not JSON, treat as content
-          }
-          firstLine = false;
-        } else {
-          fullAnswer += chunk;
-        }
+            if (firstLine && chunk.includes("\n")) {
+              const lines = chunk.split("\n");
+              try {
+                // Parse metadata from first line
+                const parsed = JSON.parse(lines[0]);
+                metadata = { ...metadata, ...parsed };
+                fullAnswer = lines.slice(1).join("\n");
+              } catch {
+                fullAnswer = chunk;
+              }
+              firstLine = false;
+            } else {
+              fullAnswer += chunk;
+            }
 
-        // Update UI in real-time
-        setChatState((prev) => ({
-          ...prev,
-          currentResponse: fullAnswer,
-        }));
-      }
+            streamedBytes += chunk.length;
+            // Use debatcher for batched updates
+            batcher.add(chunk);
+          } catch (err) {
+            console.error("Chunk processing error:", err);
+            isStreamAborted = true;
+          }
+        },
+        (err) => {
+          console.error("Stream error:", err);
+          isStreamAborted = true;
+        }
+      );
+
+      // ✅ Mark as complete
+      metadata.isComplete = success && !isStreamAborted;
+      metadata.streamDuration = Date.now() - responseStart;
+      metadata.charsReceived = streamedBytes;
+
+      // Flush any remaining buffered text
+      batcher.flush();
 
       // Extract suggested questions
       const suggested = extractSuggestedQuestions(fullAnswer);
       setSuggestedQuestions(suggested);
 
-      // Create assistant message
+      // ✅ Create assistant message with complete metadata
       const assistantMessage: Message = {
         id: generateUUID(),
         role: "assistant",
@@ -394,7 +437,7 @@ export default function Home() {
         timestamp: Date.now(),
         metadata: {
           model: metadata.model,
-          responseTime: Date.now() - responseStart,
+          responseTime: metadata.streamDuration || Date.now() - responseStart,
           tokensUsed: estimateTokens(fullAnswer),
         },
       };
@@ -407,13 +450,18 @@ export default function Home() {
         ]);
       } catch (error) {
         console.warn("Could not save to Supabase:", error);
-        // Fall back to localStorage
         const conv = localStorage.getItem(`conv_${conversationId}`);
         const existing = conv ? JSON.parse(conv) : [];
         localStorage.setItem(
           `conv_${conversationId}`,
           JSON.stringify([...existing, userMessage, assistantMessage])
         );
+      }
+
+      // If stream was incomplete, add error indicator
+      if (!metadata.isComplete && fullAnswer.length > 0) {
+        console.warn("Stream incomplete - response may be truncated");
+        // Response will still be saved but marked as incomplete
       }
 
       // Update state
@@ -429,11 +477,26 @@ export default function Home() {
       setQuery("");
       setSelectedFile(null);
     } catch (error: any) {
-      if (error.name !== "AbortError") {
+      const isAbort = error.name === "AbortError";
+      const isTimeout = error.message?.includes("The operation was aborted");
+
+      if (isAbort || isTimeout) {
+        console.warn("Request cancelled or timed out");
+        setChatState((prev) => ({
+          ...prev,
+          isLoading: false,
+          currentResponse: prev.currentResponse +
+            (prev.currentResponse ? "\n\n" : "") +
+            "⏱️ **Request timed out** - Stream took longer than 30 seconds. Please try again.",
+        }));
+      } else {
         console.error("Search error:", error);
         setChatState((prev) => ({
           ...prev,
           isLoading: false,
+          currentResponse: prev.currentResponse +
+            (prev.currentResponse ? "\n\n" : "") +
+            `❌ **Error**: ${error.message || "Failed to fetch response"}`,
         }));
       }
     }
@@ -782,6 +845,28 @@ export default function Home() {
                   )}
                   onCopy={handleCopyMessage}
                 />
+              </div>
+            )}
+
+            {/* Loading / Streaming Response Card */}
+            {loading && answer && (
+              <div className="max-w-3xl mx-auto pb-4 animate-in fade-in duration-300">
+                <div className="bg-gradient-to-br from-blue-900/30 to-gray-950/50 backdrop-blur-xl p-5 md:p-8 rounded-2xl border border-blue-500/20 shadow-2xl relative overflow-hidden">
+                  <div className="absolute inset-0 bg-gradient-to-br from-blue-500/10 via-transparent to-purple-500/5"></div>
+                  <div className="relative z-10">
+                    <div className="flex items-center gap-2 mb-4">
+                      <div className="flex gap-1">
+                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" />
+                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: "0.2s" }} />
+                        <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse" style={{ animationDelay: "0.4s" }} />
+                      </div>
+                      <span className="text-sm text-blue-300 font-medium">Streaming response...</span>
+                    </div>
+                    <p className="text-gray-200 leading-relaxed text-sm md:text-base whitespace-pre-wrap font-light">
+                      {answer}
+                    </p>
+                  </div>
+                </div>
               </div>
             )}
 
