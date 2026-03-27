@@ -27,6 +27,12 @@ export interface ChatState {
   messages: Message[];  // All messages in current conversation
   currentResponse: string;  // Being streamed
   isLoading: boolean;
+  pagination?: {
+    offset: number;  // Current page offset
+    totalMessages: number;  // Total messages in conversation
+    isLoadingOlder: boolean;  // Loading state for older messages
+    hasMore: boolean;  // Whether more messages exist
+  };
 }
 
 // ✅ Sidebar Display - Conversation summary for list

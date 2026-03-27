@@ -55,6 +55,12 @@ async function fetchWithRetry(
   throw new Error("Max retries reached. Groq API unavailable.");
 }
 
+// ✅ Context window configuration
+// Controls how many messages are passed to the model for context
+// Balances between accuracy (more context) and cost/latency (less context)
+// Adjust per deployment based on your token budget and accuracy needs
+const CONTEXT_WINDOW_SIZE = parseInt(process.env.CONTEXT_WINDOW_SIZE || "5", 10);
+
 // ✅ System Prompt — AI ko Perplexity jaisa banata hai
 const SYSTEM_PROMPT: Message = {
   role: "system",
@@ -111,12 +117,26 @@ export async function POST(req: NextRequest) {
         };
 
     // ✅ Full messages array: System + History + Current
-    // Note: Vision model ke saath history avoid karo (image context confuse karta hai)
-    const messages: Message[] = fileData
-      ? [SYSTEM_PROMPT, currentUserMessage]
-      : [SYSTEM_PROMPT, ...conversationHistory.slice(-5), currentUserMessage];
-      // slice(-5) = last 5 messages only — balance token limit & context awareness
+    // Note: Vision model gets text-only history to avoid image context confusion
+    // Text model uses configurable context window (default 5 messages)
+    let contextMessages: Message[] = [];
 
+    if (!fileData) {
+      // Text model: Use configurable context window
+      contextMessages = conversationHistory.slice(-CONTEXT_WINDOW_SIZE);
+    } else {
+      // Vision model: Extract text-only messages from history for context
+      // (skip any messages with images to avoid context confusion)
+      contextMessages = conversationHistory
+        .filter((msg) => typeof msg.content === "string")  // Only text messages
+        .slice(-Math.max(2, Math.floor(CONTEXT_WINDOW_SIZE / 2)));  // Half window for images
+    }
+
+    const messages: Message[] = [
+      SYSTEM_PROMPT,
+      ...contextMessages,
+      currentUserMessage,
+    ];
     // ✅ Create abort signal with 30-second timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30000);

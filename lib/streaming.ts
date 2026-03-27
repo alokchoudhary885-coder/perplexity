@@ -138,6 +138,50 @@ export function estimateProgressPercentage(
 }
 
 /**
+ * Select context messages based on conversation characteristics
+ * Smart selection balances accuracy with token usage
+ */
+export function selectContextMessages<T extends { role: string; content: any }>(
+  messages: T[],
+  maxMessages: number = 5,
+  isVisionMode: boolean = false
+): T[] {
+  if (!messages.length) return [];
+
+  if (isVisionMode) {
+    // Vision mode: filter text-only messages to avoid image context confusion
+    const textMessages = messages.filter(
+      (msg) => typeof msg.content === "string"
+    );
+    // Use half of max messages for vision context
+    const visionLimit = Math.max(2, Math.floor(maxMessages / 2));
+    return textMessages.slice(-visionLimit);
+  }
+
+  // Text mode: use smart selection based on conversation length
+  const conversationLength = messages.length;
+
+  if (conversationLength <= maxMessages) {
+    // Short conversation: use all history
+    return messages;
+  } else if (conversationLength <= maxMessages * 3) {
+    // Medium conversation: use last N messages
+    return messages.slice(-maxMessages);
+  } else {
+    // Long conversation: use last (N-1) messages + optimized older context
+    // This gives recent context plus some history depth
+    const recent = messages.slice(-(maxMessages - 1));
+    const olderContext = messages.slice(-Math.floor(conversationLength / 2), -(maxMessages - 1));
+
+    // If there's enough older context, include oldest message for thread coherence
+    if (olderContext.length > 0) {
+      return [messages[0], ...recent];
+    }
+    return recent;
+  }
+}
+
+/**
  * Manager for handling stream cleanup and recovery
  */
 export class StreamManager {

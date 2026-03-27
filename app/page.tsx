@@ -41,6 +41,12 @@ export default function Home() {
     messages: [],
     currentResponse: "",
     isLoading: false,
+    pagination: {
+      offset: 0,
+      totalMessages: 0,
+      isLoadingOlder: false,
+      hasMore: false,
+    },
   });
 
   // 📋 Conversations List (for sidebar)
@@ -139,6 +145,12 @@ export default function Home() {
       messages: [],
       currentResponse: "",
       isLoading: false,
+      pagination: {
+        offset: 0,
+        totalMessages: 0,
+        isLoadingOlder: false,
+        hasMore: false,
+      },
     });
     setSelectedFile(null);
     setSuggestedQuestions([]);
@@ -151,21 +163,74 @@ export default function Home() {
   };
 
   /**
-   * Load a saved conversation
+   * Load a saved conversation with pagination support
    */
-  const loadConversation = async (conversationId: string) => {
+  const loadConversation = async (conversationId: string, isLoadingOlder = false) => {
     try {
-      const messages = await db.getFullConversation(conversationId);
-      setChatState({
-        currentConversationId: conversationId,
-        messages,
-        currentResponse: "",
-        isLoading: false,
-      });
+      const currentOffset = isLoadingOlder ? (chatState.pagination?.offset || 0) + 50 : 0;
+
+      // Load messages with pagination
+      const messages = await db.getFullConversation(conversationId, 50, currentOffset);
+
+      // Get total message count for pagination state
+      const totalCount = await db.getTotalMessageCount(conversationId);
+
+      const hasMore = currentOffset + 50 < totalCount;
+
+      if (isLoadingOlder) {
+        // Prepend older messages
+        setChatState((prev) => ({
+          ...prev,
+          messages: [...messages, ...prev.messages],
+          pagination: {
+            offset: currentOffset,
+            totalMessages: totalCount,
+            isLoadingOlder: false,
+            hasMore,
+          },
+        }));
+      } else {
+        // Initial load - set all messages
+        setChatState({
+          currentConversationId: conversationId,
+          messages,
+          currentResponse: "",
+          isLoading: false,
+          pagination: {
+            offset: currentOffset,
+            totalMessages: totalCount,
+            isLoadingOlder: false,
+            hasMore,
+          },
+        });
+      }
       setIsSidebarOpen(false);
     } catch (error) {
       console.error("Failed to load conversation:", error);
     }
+  };
+
+  /**
+   * Load older messages (infinite scroll up)
+   */
+  const loadOlderMessages = async () => {
+    if (
+      !chatState.currentConversationId ||
+      chatState.pagination?.isLoadingOlder ||
+      !chatState.pagination?.hasMore
+    ) {
+      return;
+    }
+
+    setChatState((prev) => ({
+      ...prev,
+      pagination: {
+        ...prev.pagination!,
+        isLoadingOlder: true,
+      },
+    }));
+
+    await loadConversation(chatState.currentConversationId, true);
   };
 
   /**

@@ -51,27 +51,52 @@ export async function saveConversation(
 
 /**
  * Get all conversations for a session (sorted by most recent)
- * Used to populate sidebar conversation list
+ * Used to populate sidebar conversation list with pagination
  */
 export async function getSessionConversations(
-  sessionId: string
+  sessionId: string,
+  limit: number = 20,
+  offset: number = 0
 ): Promise<SavedConversation[]> {
   const supabase = getSupabaseClient();
   if (!supabase) return [];
 
-  const { data, error } = await supabase
+  // Try to query the materialized view first, fall back to direct table query
+  let result = await supabase
     .from("conversation_summaries")
     .select("*")
     .eq("session_id", sessionId)
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
 
-  if (error) {
-    console.error("Error fetching conversations:", error);
-    // Return empty array to allow graceful degradation
+  // If view doesn't exist or fails, query conversations table directly
+  if (result.error?.code === "PGRST116" || result.error?.code === "42P01") {
+    console.warn(
+      "conversation_summaries view not found, querying conversations table directly"
+    );
+    result = await supabase
+      .from("conversations")
+      .select(
+        `
+        id,
+        session_id,
+        title,
+        message_count,
+        created_at,
+        updated_at
+      `
+      )
+      .eq("session_id", sessionId)
+      .order("updated_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+  }
+
+  if (result.error) {
+    console.error("Error fetching conversations:", result.error);
     return [];
   }
 
-  return (data || []).map((row: any) => ({
+  return (result.data || []).map((row: any) => ({
     id: row.id,
     title: row.title,
     preview: row.last_message_preview || "No messages",
@@ -79,9 +104,9 @@ export async function getSessionConversations(
       id: "",
       role: "assistant",
       content: row.last_message_preview || "",
-      timestamp: row.created_at,
+      timestamp: row.created_at || row.updated_at,
     },
-    messageCount: row.message_count,
+    messageCount: row.message_count || 0,
     createdAt: row.created_at,
   }));
 }
@@ -165,12 +190,27 @@ export async function saveMessages(
     throw error;
   }
 
-  // Update conversation's updated_at and message_count
+  // ✅ FIX: Increment message_count instead of setting it
+  // First, get current message count to increment
+  const { data: currentConv, error: fetchError } = await supabase
+    .from("conversations")
+    .select("message_count")
+    .eq("id", conversationId)
+    .single();
+
+  if (fetchError) {
+    console.error("Error fetching conversation:", fetchError);
+  }
+
+  const currentCount = currentConv?.message_count || 0;
+  const newCount = currentCount + messagesToInsert.length;
+
+  // Update conversation's updated_at and message_count (incremented)
   const { error: updateError } = await supabase
     .from("conversations")
     .update({
       updated_at: Date.now(),
-      message_count: messagesToInsert.length,
+      message_count: newCount,
     })
     .eq("id", conversationId);
 
@@ -181,13 +221,13 @@ export async function saveMessages(
 }
 
 /**
- * Get conversation history with specified limit
- * Used to load messages when user opens a conversation
- * Default limit of 5 is for the backend to use for context
+ * Get conversation history with pagination support
+ * Used to load messages when user opens a conversation (first page)
  */
 export async function getConversationHistory(
   conversationId: string,
-  limit: number = 5
+  limit: number = 50,
+  offset: number = 0
 ): Promise<Message[]> {
   const supabase = getSupabaseClient();
   if (!supabase) return [];
@@ -197,7 +237,7 @@ export async function getConversationHistory(
     .select("*")
     .eq("conversation_id", conversationId)
     .order("created_at", { ascending: true })  // Oldest first
-    .limit(limit);
+    .range(offset, offset + limit - 1);
 
   if (error) {
     console.error("Error fetching conversation history:", error);
@@ -214,10 +254,37 @@ export async function getConversationHistory(
 }
 
 /**
- * Get ALL messages in a conversation (for loading full chat)
+ * Get total message count for a conversation
+ * Used for infinite scroll pagination and progress indication
+ */
+export async function getTotalMessageCount(
+  conversationId: string
+): Promise<number> {
+  const supabase = getSupabaseClient();
+  if (!supabase) return 0;
+
+  const { count, error } = await supabase
+    .from("messages")
+    .select("*", { count: "exact", head: true })
+    .eq("conversation_id", conversationId);
+
+  if (error) {
+    console.error("Error fetching message count:", error);
+    return 0;
+  }
+
+  return count || 0;
+}
+
+/**
+ * Get ALL messages in a conversation with pagination
+ * Default: First 50 messages, can load older with offset
+ * Enables infinite scroll without memory overhead
  */
 export async function getFullConversation(
-  conversationId: string
+  conversationId: string,
+  limit: number = 50,
+  offset: number = 0
 ): Promise<Message[]> {
   const supabase = getSupabaseClient();
   if (!supabase) return [];
@@ -226,7 +293,8 @@ export async function getFullConversation(
     .from("messages")
     .select("*")
     .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: true });  // Oldest first
+    .order("created_at", { ascending: true })  // Oldest first
+    .range(offset, offset + limit - 1);
 
   if (error) {
     console.error("Error fetching full conversation:", error);
@@ -242,7 +310,85 @@ export async function getFullConversation(
   }));
 }
 
+/**
+ * Update conversation timestamp without fetching all messages
+ * Used to refresh "updated_at" after new messages
+ */
+export async function updateConversationTimestamp(
+  conversationId: string
+): Promise<void> {
+  const supabase = getSupabaseClient();
+  if (!supabase) throw new Error("Supabase not configured");
+
+  const { error } = await supabase
+    .from("conversations")
+    .update({
+      updated_at: Date.now(),
+    })
+    .eq("id", conversationId);
+
+  if (error) {
+    console.error("Error updating conversation timestamp:", error);
+    throw error;
+  }
+}
+
 // ==================== SUPABASE HEALTH CHECK ====================
+
+/**
+ * Check database schema for required tables
+ * Logs warnings if tables are missing or misconfigured
+ */
+export async function checkDatabaseSchema(): Promise<boolean> {
+  if (!isSupabaseConfigured()) {
+    console.warn("Supabase not configured");
+    return false;
+  }
+
+  try {
+    const supabase = getSupabaseClient();
+    if (!supabase) return false;
+
+    // Check if required tables exist
+    const requiredTables = ["conversations", "messages"];
+    const results = await Promise.all(
+      requiredTables.map(async (table) => {
+        const { error } = await supabase.from(table).select("count").limit(1);
+        if (error) {
+          console.warn(`Table "${table}" not found or inaccessible:`, error.message);
+          return false;
+        }
+        return true;
+      })
+    );
+
+    // Check for conversation_summaries view (optional, will fall back to direct table query)
+    const { error: viewError } = await supabase
+      .from("conversation_summaries")
+      .select("count")
+      .limit(1);
+
+    if (viewError?.code === "PGRST116" || viewError?.code === "42P01") {
+      console.warn(
+        "conversation_summaries view not found - using direct table query as fallback"
+      );
+    } else if (viewError) {
+      console.warn("Error checking conversation_summaries view:", viewError.message);
+    } else {
+      console.info("✓ conversation_summaries view exists");
+    }
+
+    const allTablesExist = results.every((result) => result);
+    if (allTablesExist) {
+      console.info("✓ All required database tables exist");
+    }
+
+    return allTablesExist;
+  } catch (error) {
+    console.error("Database schema check failed:", error);
+    return false;
+  }
+}
 
 /**
  * Check if Supabase is properly configured
